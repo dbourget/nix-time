@@ -1,0 +1,139 @@
+#!/usr/bin/perl
+use Data::Dumper;
+use strict;
+use warnings;
+
+# (c) David Bourget 2013
+# See README.md file for license details
+#
+
+my $conf = read_config("/etc/nix-time.conf");
+
+$conf->{dir} ||= "/raid/nix-time";
+error("Destination directory does not contain absolute path: $conf->{dir}") unless $conf->{dir} =~ m!^/!;
+error("Invalid character in destination path") if $conf->{dir} =~ /"/;
+
+my @points = $conf->{timepoints} ? @{$conf->{timepoints}} : qw/1 2 3 4 5 6 7 8 9 10 20 30 60 90 150 300 600 1200 10000/;
+my $dir = $conf->{dir};
+
+if ($ARGV[0] and $ARGV[0] eq 'init') {
+	initialize($conf->{dir});
+	exit;
+}
+
+my $CP = "cp -ldpR";
+my $R = "/usr/bin/rsync";
+
+error("Cannot find nix-time directory: $conf->{dir}. You might want to run 'nix-time init' first.") unless (-d $conf->{dir});
+error("Cannot find nix-time incoming directory: $conf->{dir}/current. You might want to run 'nix-time init' first.") unless (-d "$conf->{dir}/current");
+
+# check which snapshots have to be updated, and rotate them
+logmsg("Starting");
+rotate(find_start());
+logmsg("Finished");
+
+sub initialize {
+	my $dir = shift;
+	logmsg("Initializing directories under $dir\n");
+	my $verbose = 1;
+	execute("mkdir -p $dir",$verbose);
+	execute("mkdir -p $dir/current",$verbose);
+	execute("mkdir -p $dir/snapshots",$verbose);	
+	execute("sudo chown root.root $dir/snapshots",$verbose);
+	execute("sudo chmod 700 $dir/snapshots",$verbose);
+}
+
+sub execute {
+	my $cmd = shift;
+	my $show = shift;
+	print "> $cmd\n" if $show;
+	my $result = `$cmd 2>&1`;
+	print "$result\n" if $show;
+	if ($? == -1) {
+		error("failed to execute shell command: `$cmd`. Error message: $!");
+	}
+}
+
+sub find_start {
+	my $scale = 60 * 60 * 24; # days
+	#$scale = 10; # 10 secs
+	for my $p (reverse @points) {
+		return $p unless -d "$dir/snapshots/$p";
+		my @stats = stat("$dir/snapshots/$p");
+		my $diff = time() - $stats[9];
+		#warn "$p is $diff seconds old";
+		return $p if ( $diff / $scale >= $p );
+	}
+	return 0;
+}
+
+sub rotate {
+	my $to = shift;
+	logmsg("Rotating snapshots <= $to");
+	my @todo = grep { $_ <= $to } reverse @points;	
+	my @cmds;
+	if ($to and -d "$dir/snapshots/$to") {
+		push @cmds, "mv $dir/snapshots/$to $dir/snapshots/to_delete";
+	}
+	for my $p (@todo) {
+		my $prev = prev($p);
+		if ($prev) { 
+			push @cmds, "mv $dir/snapshots/$prev $dir/snapshots/$p" if -d "$dir/snapshots/$prev";	
+		} else {
+			push @cmds, "$CP $dir/snapshots/0 $dir/snapshots/1" if -d "$dir/snapshots/0";
+		}
+	}
+	push @cmds, "$R -avH --delete $dir/current/ $dir/snapshots/0/";
+	push @cmds, "touch $dir/snapshots/0";
+	push @cmds,"rm -rf $dir/snapshots/to_delete" if -d "$dir/snapshots/$to";
+	execute($_,1) for @cmds;
+}
+
+sub prev {
+	my $p = shift;
+	use List::Util 'first';
+	my $idx = first { $points[$_] == $p } 0..$#points;	
+	return $idx ? $points[$idx-1] : 0;	
+}
+
+sub error {
+	my $msg = shift;
+	logmsg("Error: $msg");
+	exit(1);
+}
+
+my @multival = qw/execute-before execute-after/;
+
+sub logmsg {
+	my $msg = shift;
+	print "$msg\n";
+	open F, ">>/var/log/nix-time.log";
+	print F localtime() . ": $msg\n";
+	close F;
+}
+
+sub read_config {
+	my $file = shift;
+	unless (-r $file) {
+		error("Cannot read config file: $file");
+	}
+	my %conf;
+	$conf{$_} = [] for @multival;
+	open F, $file;
+	while (my $l = <F>) {
+		$l =~ s/#.+//;
+		next unless ($l =~ /\s*(.+?)\s*=\s*(.+)/);
+		my ($var,$val) = ($1,$2);
+		$val =~ s/\s+$//;
+		#print "Read config entry: '$var' -> '$val'\n";
+		if ($var eq 'timepoints') {
+			$conf{timepoints} = [split(/\s+/,$val)];
+		} elsif (grep {$_ eq $var} @multival) {
+			push @{$conf{$var}}, $val;	
+		} else {
+			$conf{$var} = $conf{$val};
+		}
+	}
+
+	return \%conf;
+}
