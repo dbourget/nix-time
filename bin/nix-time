@@ -26,10 +26,20 @@ my $R = "/usr/bin/rsync";
 
 error("Cannot find nix-time directory: $conf->{dir}. You might want to run 'nix-time init' first.") unless (-d $conf->{dir});
 error("Cannot find nix-time incoming directory: $conf->{dir}/current. You might want to run 'nix-time init' first.") unless (-d "$conf->{dir}/current");
-
+print Dumper($conf);
 # check which snapshots have to be updated, and rotate them
 logmsg("Starting");
+if ($conf->{"execute-before"}) {
+	for my $line (@{$conf->{"execute-before"}}) {
+		execute($line,1);
+	}
+}
 rotate(find_start());
+if ($conf->{"execute-after"}) {
+	for my $line (@{$conf->{"execute-after"}}) {
+		execute($line,1);
+	}
+}
 logmsg("Finished");
 
 sub initialize {
@@ -102,7 +112,6 @@ sub error {
 	exit(1);
 }
 
-my @multival = qw/execute-before execute-after/;
 
 sub logmsg {
 	my $msg = shift;
@@ -113,6 +122,7 @@ sub logmsg {
 }
 
 sub read_config {
+	my @multival = qw/execute-before execute-after/;
 	my $file = shift;
 	unless (-r $file) {
 		error("Cannot read config file: $file");
@@ -128,10 +138,10 @@ sub read_config {
 		#print "Read config entry: '$var' -> '$val'\n";
 		if ($var eq 'timepoints') {
 			$conf{timepoints} = [split(/\s+/,$val)];
-		} elsif (grep {$_ eq $var} @multival) {
+		} elsif (grep {/$var/} @multival) {
 			push @{$conf{$var}}, $val;	
 		} else {
-			$conf{$var} = $conf{$val};
+			$conf{$var} = $val;
 		}
 	}
 
